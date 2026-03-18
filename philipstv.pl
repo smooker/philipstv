@@ -99,6 +99,7 @@ my %commands = (
     'sources'     => \&cmd_sources,
     'key'         => \&cmd_key,
     'pair'        => \&cmd_pair,
+    'hdmi'        => \&cmd_hdmi,
     'get'         => \&cmd_get,
     'post'        => \&cmd_post,
     'screen'      => \&cmd_screen,
@@ -344,6 +345,54 @@ sub cmd_setting_set {
     print $ok ? "OK\n" : "FAILED\n";
 }
 
+sub cmd_hdmi {
+    my ($num) = @_;
+    $num = 1 unless defined $num;
+
+    # Source menu position for HDMI inputs — configurable in .philipstv.conf
+    # Default: HDMI-1 = position 5 from top (Home is position 1)
+    my $pos = $num;
+    if ($CONFFILE && -f $CONFFILE) {
+        open my $fh, '<', $CONFFILE;
+        while (<$fh>) {
+            chomp;
+            if (/^hdmi${num}_pos\s*=\s*(\d+)/) {
+                $pos = $1;
+                last;
+            }
+        }
+        close $fh;
+    }
+
+    # Fallback: read from config or use default mapping
+    unless ($pos > 1) {
+        $pos = 5;  # default for HDMI-1
+    }
+
+    my $steps = $pos - 1;  # Home is position 1
+
+    print "Switching to HDMI-$num (source menu position $pos)...\n";
+
+    # Send Source key and wait for menu to open
+    api_post('input/key', { key => 'Source' });
+    _delay(1.5);
+
+    # Navigate down to the right position
+    for my $i (1..$steps) {
+        api_post('input/key', { key => 'CursorDown' });
+        _delay(0.6);
+    }
+
+    # Confirm
+    api_post('input/key', { key => 'Confirm' });
+    print "Done\n";
+}
+
+sub _delay {
+    my ($sec) = @_;
+    select(undef, undef, undef, $sec);
+}
+
 sub cmd_pair {
     # Step 1: Get system info first (for featuring data)
     my $ua_noauth = LWP::UserAgent->new(
@@ -548,6 +597,10 @@ Commands:
   source           Show current source
   sources          List all sources
   source <id>      Switch source
+
+  hdmi [N]         Switch to HDMI-N input (default: 1)
+                   Position configurable in ~/.philipstv.conf:
+                     hdmi1_pos = 5
 
   pair             Pair with TV (interactive, shows PIN on screen)
 
