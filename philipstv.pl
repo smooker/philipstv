@@ -24,6 +24,7 @@ my $PORT     = 1926;
 my $API      = 6;
 my $USER     = '';
 my $PASS     = '';
+my $CONF     = '';
 my $DEBUG    = 0;
 my $HELP     = 0;
 
@@ -33,6 +34,7 @@ GetOptions(
     'api=i'    => \$API,
     'user=s'   => \$USER,
     'pass=s'   => \$PASS,
+    'conf=s'   => \$CONF,
     'debug'    => \$DEBUG,
     'help'     => \$HELP,
 ) or die "Bad options. Try --help\n";
@@ -45,9 +47,20 @@ if ($HELP || !$CMD) {
     exit 0;
 }
 
-# Load config from ~/.philipstv.conf if exists
-my $CONFFILE = ($ENV{HOME} || '/tmp') . "/.philipstv.conf";
-if (-f $CONFFILE) {
+# Load config file: --conf, or ~/.philipstv.conf, or /home/claude-agent/.philipstv.conf
+my $CONFFILE = $CONF;
+unless ($CONFFILE && -f $CONFFILE) {
+    my $home = $ENV{HOME} || (getpwuid($<))[7] || '';
+    my @candidates = (
+        ($home ? "$home/.philipstv.conf" : ()),
+        '/home/claude-agent/.philipstv.conf',
+    );
+    for my $c (@candidates) {
+        if (-f $c) { $CONFFILE = $c; last; }
+    }
+}
+if ($CONFFILE && -f $CONFFILE) {
+    print STDERR "Config: $CONFFILE\n" if $DEBUG;
     open(my $fh, '<', $CONFFILE);
     while (<$fh>) {
         chomp;
@@ -567,14 +580,15 @@ philipstv.pl — Philips TV CLI (JointSpace API v6)
 Usage: philipstv.pl [options] <command> [args]
 
 Options:
-  --host IP        TV IP address (required, or set in ~/.philipstv.conf)
+  --host IP        TV IP address (required, or set in config file)
   --port PORT      API port (default: 1926)
   --user USER      Digest auth username (from pairing)
   --pass PASS      Digest auth password (from pairing)
+  --conf FILE      Config file path (default: ~/.philipstv.conf)
   --debug          Show HTTP requests
   --help           This help
 
-Config file (~/.philipstv.conf):
+Config file (searched in order: --conf, ~/.philipstv.conf):
   host = 192.168.1.100
   user = your_username_here
   pass = your_password_here
