@@ -580,7 +580,6 @@ sub cmd_tv_screen {
 
     my $port = $CAST_PORT + 1;  # 8889
     my $local_ip = _get_local_ip();
-    my $script = File::Spec->rel2abs($0);
 
     # Kill old stuff on port
     system("fuser -k $port/tcp >/dev/null 2>&1");
@@ -592,25 +591,33 @@ sub cmd_tv_screen {
         system("tmux new-session -d -s tv -n remote 'bash'");
     }
 
-    # Add screen window in tmux — runs Xephyr + WM + capture
+    # Window: screen — Xephyr + WM + xterm
     my $screen_cmd = join('; ',
         "echo '=== TV Screen: $disp ($res) ==='",
         "Xephyr $disp -screen $res -resizeable -no-host-grab &",
         "sleep 2",
         "DISPLAY=$disp xfwm4 &",
         "DISPLAY=$disp xterm &",
-        "sleep 1",
-        "echo '>>> Capture starting (NVENC)...'",
-        "DISPLAY=$disp ffmpeg -f x11grab -framerate 25 -video_size $res -i $disp " .
-            "-c:v h264_nvenc -preset p4 -b:v 10M -g 50 -c:a aac -b:a 192k " .
-            "-movflags +frag_keyframe+empty_moov+default_base_moof " .
-            "-f mp4 -listen 1 http://0.0.0.0:$port",
-        "echo '>>> Screen capture ended'",
+        "echo 'Xephyr running. DISPLAY=$disp'",
         "bash",
     );
     system("tmux new-window -t tv -n screen '$screen_cmd'");
 
-    sleep 4;
+    # Window: ffmpeg — NVENC capture
+    my $ffmpeg_cmd = join('; ',
+        "echo '=== NVENC Capture: $disp ($res) -> :$port ==='",
+        "sleep 3",
+        "DISPLAY=$disp ffmpeg -f x11grab -framerate 25 -video_size $res -i $disp " .
+            "-c:v h264_nvenc -preset p4 -b:v 10M -g 50 " .
+            "-movflags +frag_keyframe+empty_moov+default_base_moof " .
+            "-f mp4 -listen 1 http://0.0.0.0:$port",
+        "echo '>>> Capture ended'",
+        "bash",
+    );
+    system("tmux new-window -t tv -n ffmpeg '$ffmpeg_cmd'");
+    system("tmux set-option -t tv:ffmpeg remain-on-exit on");
+
+    sleep 5;
 
     # DLNA play
     my $url = "http://$local_ip:$port";
@@ -619,9 +626,10 @@ sub cmd_tv_screen {
 
     print "=== TV Screen Active ===\n";
     print "Display: DISPLAY=$disp\n";
-    print "Run: DISPLAY=$disp firefox\n";
-    print "     DISPLAY=$disp vlc movie.mp4\n";
-    print "tmux attach -t tv (window: screen)\n";
+    print "Stream:  http://$local_ip:$port\n";
+    print "Run:     DISPLAY=$disp firefox &\n";
+    print "         DISPLAY=$disp vlc movie.mp4 &\n";
+    print "tmux:    attach -t tv (windows: screen, ffmpeg)\n";
 }
 
 sub cmd_tv_screen_stop {
@@ -629,7 +637,8 @@ sub cmd_tv_screen_stop {
     system("pkill -f 'Xephyr $disp'");
     system("fuser -k " . ($CAST_PORT + 1) . "/tcp 2>/dev/null");
     print "TV screen stopped\n";
-    # Kill tmux window
+    # Kill tmux windows
+    system("tmux kill-window -t tv:ffmpeg 2>/dev/null");
     system("tmux kill-window -t tv:screen 2>/dev/null");
 }
 
@@ -711,8 +720,9 @@ sub cmd_tv {
     $file_or_dir ||= '.';
 
     use File::Spec;
-    my $abs = File::Spec->rel2abs($file_or_dir);
-    my $serve_dir = -d $abs ? $abs : (($abs =~ m{^(.+)/}) ? $1 : '.');
+    my $is_url = ($file_or_dir =~ m{^https?://});
+    my $abs = $is_url ? '' : File::Spec->rel2abs($file_or_dir);
+    my $serve_dir = $is_url ? '.' : (-d $abs ? $abs : (($abs =~ m{^(.+)/}) ? $1 : '.'));
     my $port = $CAST_PORT;
     my $local_ip = _get_local_ip();
     my $script = File::Spec->rel2abs($0);
@@ -813,8 +823,15 @@ sub cmd_tv {
     close($hf);
     system("tmux new-window -t tv -n remote 'bash --rcfile $rcfile'");
 
-    # If specific file given, play it
-    if (-f $abs) {
+    # If URL given, play directly via DLNA
+    if ($file_or_dir =~ m{^https?://}) {
+        sleep 1;
+        print "Playing: $file_or_dir\n";
+        _dlna_play($HOST, $file_or_dir);
+        system("tmux send-keys -t tv:remote '$script dlna-status' Enter");
+    }
+    # If specific file given, serve and play it
+    elsif (-f $abs) {
         my ($name) = $abs =~ m{([^/]+)$};
         sleep 1;
         my $ename = $name;
