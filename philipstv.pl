@@ -19,6 +19,7 @@ use MIME::Base64;
 use Digest::HMAC_SHA1;
 use Sys::Hostname;
 use Socket qw(inet_aton sockaddr_in);
+use IO::Socket::INET;
 
 my $HOST     = '';
 my $PORT     = 1926;
@@ -854,7 +855,6 @@ sub _dlna_play {
 
 sub _ssdp_discover {
     my ($tv_ip) = @_;
-    require IO::Socket::INET;
 
     my $search = "M-SEARCH * HTTP/1.1\r\n" .
                  "HOST: 239.255.255.250:1900\r\n" .
