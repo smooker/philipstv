@@ -975,7 +975,17 @@ sub _start_http_server {
     my ($dir, $port) = @_;
     my $pidfile = "/tmp/philipstv-http.pid";
 
-    # Kill anything on this port
+    # Check if our server is already running on this port
+    if (-f $pidfile) {
+        open(my $pf, '<', $pidfile);
+        my $old_pid = <$pf>; chomp $old_pid; close($pf);
+        if ($old_pid && kill(0, $old_pid)) {
+            print "HTTP server already running (PID $old_pid)\n";
+            return $old_pid;
+        }
+    }
+
+    # Kill anything else on this port
     system("fuser -k $port/tcp >/dev/null 2>&1");
     sleep 1;
 
@@ -1022,6 +1032,12 @@ sub _http_handle {
     my $request_line = <$client>;
     return unless $request_line;
     chomp $request_line;
+
+    # Log to stderr (visible in debug mode or /tmp/philipstv-http.log)
+    my $ts = `date +%H:%M:%S 2>/dev/null`; chomp $ts;
+    open(my $log, '>>', '/tmp/philipstv-http.log');
+    print $log "$ts $request_line\n";
+    close($log);
 
     my ($method, $path) = $request_line =~ m{^(GET|HEAD)\s+(/\S*)\s+HTTP/};
     return unless $method && $path;
