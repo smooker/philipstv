@@ -461,6 +461,11 @@ sub cmd_cast {
     } else {
         # Transcode first
         print "Transcoding with ffmpeg" . ($use_nvenc ? " (NVENC)" : "") . "...\n";
+        # GPU monitor if NVENC
+        if ($use_nvenc) {
+            system("tmux has-session -t tv 2>/dev/null || tmux new-session -d -s tv -n remote 'bash'");
+            system("tmux new-window -t tv -n gpu 'watch -n1 nvidia-smi'");
+        }
         system(@ffcmd);
         if ($? != 0) {
             die "ffmpeg failed\n";
@@ -598,6 +603,9 @@ sub cmd_tv_screen {
     );
     system("tmux new-window -t tv -n screen '$screen_cmd'");
 
+    # nvidia-smi monitor window
+    system("tmux new-window -t tv -n gpu 'watch -n1 nvidia-smi'");
+
     sleep 4;
 
     # DLNA play
@@ -637,16 +645,6 @@ sub cmd_wol {
     $sock->close;
 
     print "WoL magic packet sent to $MAC\n";
-    print "Waiting for TV...\n";
-    for my $i (1..10) {
-        sleep 2;
-        my $scr = api_get('screenstate');
-        if ($scr && ($scr->{screenstate} || '') eq 'On') {
-            print "TV is ON!\n";
-            return;
-        }
-    }
-    print "TV did not respond (may not support WoL over WiFi)\n";
 }
 
 sub cmd_tv {
