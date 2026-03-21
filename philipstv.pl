@@ -744,6 +744,7 @@ sub cmd_tv {
     #  window 1: playlist — файлове за избор
     #  window 2: remote — интерактивен контрол
     system("tmux new-session -d -s tv -n http '$script --cast-port $port serve \"$serve_dir\"'");
+    system("tmux set-option -t tv:http remain-on-exit on");
     system("tmux new-window -t tv -n playlist 'cat $playlist; echo; echo \"Play: philipstv.pl dlna-play http://$local_ip:$port/FILENAME\"; echo \"Vol:  philipstv.pl vol+/vol-/mute\"; echo; bash'");
     # Write rc file with aliases
     my $rcfile = "/tmp/tv-remote.rc";
@@ -848,6 +849,13 @@ sub cmd_dlna_play_url {
         my $abs = File::Spec->rel2abs($file_or_url);
         my ($dir, $name) = $abs =~ m{^(.+)/([^/]+)$};
         my $local_ip = _get_local_ip();
+
+        # Update dirfile so running serve process picks up new dir
+        my $dirfile = "/tmp/philipstv-http.dir";
+        open(my $df, '>', $dirfile);
+        print $df "$dir\n";
+        close($df);
+
         _start_http_server($dir, $CAST_PORT);
         my $encoded = $name;
         $encoded =~ s/([^A-Za-z0-9._~-])/sprintf("%%%02X", ord($1))/ge;
@@ -1028,29 +1036,15 @@ sub _start_http_server {
     my $pidfile = "/tmp/philipstv-http.pid";
     my $dirfile = "/tmp/philipstv-http.dir";
 
-    # Check if server already running on same dir
+    # Check if server already running — reuse regardless of dir
     if (-f $pidfile) {
         open(my $fh, '<', $pidfile);
         my $old_pid = <$fh>; chomp $old_pid; close $fh;
         if ($old_pid && kill(0, $old_pid)) {
-            my $old_dir = '';
-            if (-f $dirfile) {
-                open(my $df, '<', $dirfile);
-                $old_dir = <$df>; chomp $old_dir; close $df;
-            }
-            if ($old_dir eq $dir) {
-                print "HTTP server already running on :$port (PID $old_pid)\n";
-                return $old_pid;
-            }
-            # Different dir — kill old server
-            kill('TERM', $old_pid);
-            sleep 1;
+            print "HTTP server already running on :$port (PID $old_pid)\n";
+            return $old_pid;
         }
     }
-
-    # Kill anything else on this port
-    system("fuser -k $port/tcp >/dev/null 2>&1");
-    sleep 1;
 
     my $pid = fork();
     die "fork failed: $!\n" unless defined $pid;
@@ -1124,6 +1118,18 @@ sub _http_handle {
     $decoded =~ s/%([0-9A-Fa-f]{2})/chr(hex($1))/ge;
     $decoded =~ s{^/}{};
     $decoded =~ s{\.\./}{}g;  # prevent traversal
+
+    # Re-read dir from dirfile (may have been updated by dlna-play)
+    my $_dirfile = "/tmp/philipstv-http.dir";
+    if (-f $_dirfile) {
+        open(my $df, '<', $_dirfile);
+        my $new_dir = <$df>; close $df;
+        $new_dir =~ s/\s+$//;
+        if ($new_dir && $new_dir ne $dir) {
+            printf "  [cwd: %s -> %s]\n", $dir, $new_dir;
+            $dir = $new_dir;
+        }
+    }
 
     my $file = "$dir/$decoded";
 
