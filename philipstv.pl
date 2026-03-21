@@ -684,7 +684,9 @@ sub cmd_tv {
     #  window 0: http — server с видими requests
     #  window 1: playlist — файлове за избор
     #  window 2: remote — интерактивен контрол
-    system("tmux new-session -d -s tv -n http 'cd \"$serve_dir\" && python3 -m http.server $port'");
+    # Start built-in Perl HTTP server (fork, background)
+    _start_http_server($serve_dir, $port);
+    system("tmux new-session -d -s tv -n http 'echo \"HTTP server on :$port serving $serve_dir\"; watch -n5 \"netstat -tn 2>/dev/null | grep $port || ss -tn | grep $port\"'");
     system("tmux new-window -t tv -n playlist 'cat $playlist; echo; echo \"Play: philipstv.pl dlna-play http://$local_ip:$port/FILENAME\"; echo \"Vol:  philipstv.pl vol+/vol-/mute\"; echo; bash'");
     # Write rc file with aliases
     my $rcfile = "/tmp/tv-remote.rc";
@@ -752,6 +754,11 @@ sub cmd_tv {
     print $hf "$_\n" for @cmds;
     close($hf);
     system("tmux new-window -t tv -n remote 'bash --rcfile $rcfile'");
+
+    # GPU monitor if NVENC
+    if ($NVENC) {
+        system("tmux new-window -t tv -n gpu 'watch -n1 nvidia-smi'");
+    }
 
     # If specific file given, play it
     if (-f $abs) {
