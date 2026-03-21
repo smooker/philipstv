@@ -134,6 +134,7 @@ my %commands = (
     'tv'          => \&cmd_tv,
     'wol'         => \&cmd_wol,
     'on'          => \&cmd_wol,
+    'helptv'      => \&cmd_helptv,
 );
 
 if (my $fn = $commands{$CMD}) {
@@ -513,6 +514,36 @@ sub cmd_dlna_status {
     print $res->content . "\n";
 }
 
+sub cmd_helptv {
+    print <<'TV';
+=== TV Quick Reference ===
+
+  on / wol          Wake TV (magic packet)
+  status            Volume, channel, screen state
+  vol+ / vol-       Volume up/down
+  vol 20            Set volume
+  mute / unmute     Toggle mute
+
+  dlna-play FILE    Play local file on TV (auto HTTP server)
+  dlna-play URL     Play remote URL on TV
+  dlna-status       DLNA transport state
+  stop-cast         Stop HTTP server + send Back key
+
+  pause / play / stop   Playback control (key aliases)
+  key Home / Back / Confirm / CursorUp/Down/Left/Right
+
+  ch nova           Switch channel (partial match)
+  channels          List all channels
+  hdmi 1            Switch to HDMI input
+
+  tv ~/Videos/      Open tmux TV dashboard for folder
+  screen On/Off     Display on/off
+
+  system            Model, firmware, API version
+  settings          Settings tree with node IDs
+TV
+}
+
 sub cmd_wol {
     die "No MAC address — set mac in ~/.philipstv.conf\n" unless $MAC;
     $MAC =~ s/[:-]//g;
@@ -594,6 +625,7 @@ sub cmd_tv {
     print $rc "alias stop='$script key Stop'\n";
     print $rc "alias on='$script on'\n";
     print $rc "alias wol='$script wol'\n";
+    print $rc "alias helptv='$script helptv'\n";
     print $rc "alias dlna-play='$script dlna-play'\n";
     print $rc "alias dlna-status='$script dlna-status'\n";
     print $rc "alias status='$script status'\n";
