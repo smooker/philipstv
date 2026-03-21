@@ -692,6 +692,8 @@ sub cmd_tv {
     my $rcfile = "/tmp/tv-remote.rc";
     open(my $rc, '>', $rcfile);
     print $rc "[ -f ~/.bashrc ] && source ~/.bashrc\n";
+    print $rc "export HISTFILE=/tmp/tv-remote.history\n";
+    print $rc "export HISTSIZE=500\n";
     print $rc "alias tv='$script'\n";
     print $rc "alias vol+='$script vol+'\n";
     print $rc "alias vol-='$script vol-'\n";
