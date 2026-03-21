@@ -864,7 +864,12 @@ sub _start_http_server {
         chdir $dir or die "Cannot chdir to $dir: $!\n";
         open(STDOUT, '>/dev/null');
         open(STDERR, '>/dev/null') unless $DEBUG;
-        exec('python3', '-m', 'http.server', "$port") or die "Cannot start HTTP server: $!\n";
+        exec('python3', '-c',
+            "from http.server import HTTPServer, SimpleHTTPRequestHandler; " .
+            "from socketserver import ThreadingMixIn; " .
+            "class T(ThreadingMixIn, HTTPServer): pass; " .
+            "T(('', $port), SimpleHTTPRequestHandler).serve_forever()"
+        ) or die "Cannot start HTTP server: $!\n";
     }
 
     # Save PID
