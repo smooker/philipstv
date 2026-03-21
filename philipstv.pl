@@ -26,6 +26,7 @@ my $API      = 6;
 my $USER     = '';
 my $PASS     = '';
 my $CONF     = '';
+my $MAC      = '';
 my $DEBUG    = 0;
 my $HELP     = 0;
 my $NVENC    = 0;
@@ -77,6 +78,7 @@ if ($CONFFILE && -f $CONFFILE) {
             $PORT ||= $v if $k eq 'port';
             $USER ||= $v if $k eq 'user';
             $PASS ||= $v if $k eq 'pass';
+            $MAC  ||= $v if $k eq 'mac';
         }
     }
     close($fh);
@@ -129,6 +131,9 @@ my %commands = (
     'stop-cast'   => \&cmd_stop_cast,
     'dlna-status' => \&cmd_dlna_status,
     'dlna-play'   => \&cmd_dlna_play_url,
+    'tv'          => \&cmd_tv,
+    'wol'         => \&cmd_wol,
+    'on'          => \&cmd_wol,
 );
 
 if (my $fn = $commands{$CMD}) {
@@ -461,24 +466,10 @@ sub cmd_cast {
         print "Transcode done: $serve_file\n";
     }
 
-    # Start HTTP server (python3 simple)
-    my $serve_dir = $serve_file;
-    my $serve_name;
-    if ($serve_file =~ m{^(.+)/([^/]+)$}) {
-        $serve_dir = $1;
-        $serve_name = $2;
-    }
+    # Serve file via HTTP
+    my ($serve_dir, $serve_name) = $serve_file =~ m{^(.+)/([^/]+)$};
+    _start_http_server($serve_dir, $http_port);
 
-    my $http_pid = fork();
-    die "fork failed: $!\n" unless defined $http_pid;
-    if ($http_pid == 0) {
-        chdir $serve_dir;
-        open(STDOUT, '>/dev/null');
-        open(STDERR, '>/dev/null') unless $DEBUG;
-        exec('python3', '-m', 'http.server', $http_port) or die "Cannot start HTTP server: $!\n";
-    }
-
-    sleep 1;
     my $stream_url = "http://$local_ip:$http_port/$serve_name";
     print "Stream URL: $stream_url\n";
 
@@ -487,17 +478,7 @@ sub cmd_cast {
     _dlna_play($HOST, $stream_url);
 
     print "Casting to $HOST — Ctrl+C to stop\n";
-
-    # Save PID for stop-cast
-    my $pidfile = "/tmp/philipstv-cast.pid";
-    open(my $fh, '>', $pidfile);
-    print $fh "$http_pid\n";
-    close($fh);
-
-    # Wait
-    waitpid($http_pid, 0);
-    unlink $pidfile;
-    print "Cast ended.\n";
+    print "Stop with: $0 stop-cast\n";
 }
 
 sub cmd_stop_cast {
@@ -532,9 +513,137 @@ sub cmd_dlna_status {
     print $res->content . "\n";
 }
 
+sub cmd_wol {
+    die "No MAC address — set mac in ~/.philipstv.conf\n" unless $MAC;
+    $MAC =~ s/[:-]//g;
+    my $mac_bytes = pack('H12', $MAC);
+    my $magic = "\xff" x 6 . $mac_bytes x 16;
+
+    require IO::Socket::INET;
+    my $sock = IO::Socket::INET->new(
+        Proto => 'udp',
+        Broadcast => 1,
+    ) or die "Cannot create socket: $!\n";
+    my $dest = sockaddr_in(9, inet_aton('255.255.255.255'));
+    $sock->send($magic, 0, $dest);
+    $sock->close;
+
+    print "WoL magic packet sent to $MAC\n";
+    print "Waiting for TV...\n";
+    for my $i (1..10) {
+        sleep 2;
+        my $scr = api_get('screenstate');
+        if ($scr && ($scr->{screenstate} || '') eq 'On') {
+            print "TV is ON!\n";
+            return;
+        }
+    }
+    print "TV did not respond (may not support WoL over WiFi)\n";
+}
+
+sub cmd_tv {
+    my ($file_or_dir) = @_;
+    $file_or_dir ||= '.';
+
+    use File::Spec;
+    my $abs = File::Spec->rel2abs($file_or_dir);
+    my $serve_dir = -d $abs ? $abs : (($abs =~ m{^(.+)/}) ? $1 : '.');
+    my $port = $CAST_PORT;
+    my $local_ip = _get_local_ip();
+    my $script = File::Spec->rel2abs($0);
+
+    # Kill old session
+    system("tmux kill-session -t tv 2>/dev/null");
+    system("fuser -k $port/tcp >/dev/null 2>&1");
+    sleep 1;
+
+    # Build file list for display
+    my @files;
+    opendir(my $dh, $serve_dir);
+    while (my $f = readdir($dh)) {
+        push @files, $f if $f =~ /\.(mp4|mkv|avi|mov|ts|flv|wmv|mp3|flac|ogg|wav|m4a|webm)$/i;
+    }
+    closedir($dh);
+
+    # Create playlist file
+    my $playlist = "/tmp/tv-playlist.txt";
+    open(my $pl, '>', $playlist);
+    my $i = 1;
+    for my $f (sort @files) {
+        printf $pl "%3d  %s\n", $i++, $f;
+    }
+    close($pl);
+
+    # tmux session
+    #  window 0: http — server с видими requests
+    #  window 1: playlist — файлове за избор
+    #  window 2: remote — интерактивен контрол
+    system("tmux new-session -d -s tv -n http 'cd \"$serve_dir\" && python3 -m http.server $port'");
+    system("tmux new-window -t tv -n playlist 'cat $playlist; echo; echo \"Play: philipstv.pl dlna-play http://$local_ip:$port/FILENAME\"; echo \"Vol:  philipstv.pl vol+/vol-/mute\"; echo; bash'");
+    # Write rc file with aliases
+    my $rcfile = "/tmp/tv-remote.rc";
+    open(my $rc, '>', $rcfile);
+    print $rc "[ -f ~/.bashrc ] && source ~/.bashrc\n";
+    print $rc "alias tv='$script'\n";
+    print $rc "alias vol+='$script vol+'\n";
+    print $rc "alias vol-='$script vol-'\n";
+    print $rc "alias mute='$script mute'\n";
+    print $rc "alias unmute='$script unmute'\n";
+    print $rc "alias pause='$script key Pause'\n";
+    print $rc "alias play='$script key Play'\n";
+    print $rc "alias stop='$script key Stop'\n";
+    print $rc "alias on='$script on'\n";
+    print $rc "alias wol='$script wol'\n";
+    print $rc "alias dlna-play='$script dlna-play'\n";
+    print $rc "alias dlna-status='$script dlna-status'\n";
+    print $rc "alias status='$script status'\n";
+    print $rc "echo '=== TV Remote ==='\n";
+    print $rc "echo 'vol+ vol- mute unmute pause play stop'\n";
+    print $rc "echo 'dlna-play FILE | dlna-status | status'\n";
+    print $rc "echo 'tv vol 20 | tv key Home | tv ch nova'\n";
+    print $rc "echo ''\n";
+    close($rc);
+    system("tmux new-window -t tv -n remote 'bash --rcfile $rcfile'");
+
+    # If specific file given, play it
+    if (-f $abs) {
+        my ($name) = $abs =~ m{([^/]+)$};
+        sleep 1;
+        my $url = "http://$local_ip:$port/$name";
+        print "Playing: $url\n";
+        _dlna_play($HOST, $url);
+        system("tmux send-keys -t tv:remote '$script dlna-status' Enter");
+    }
+
+    print "=== TV Session ===\n";
+    print "tmux attach -t tv\n";
+    print "Windows: http | playlist | remote\n";
+    printf "Files: %d in %s\n", scalar @files, $serve_dir;
+    print "URL base: http://$local_ip:$port/\n";
+
+    # Attach
+    exec("tmux attach -t tv");
+}
+
 sub cmd_dlna_play_url {
-    my ($url) = @_;
-    die "Usage: philipstv.pl dlna-play <url>\n" unless $url;
+    my ($file_or_url) = @_;
+    die "Usage: philipstv.pl dlna-play <file|url>\n" unless $file_or_url;
+
+    my $url;
+    if ($file_or_url =~ m{^https?://}) {
+        $url = $file_or_url;
+    } else {
+        # Local file — serve it
+        die "File not found: $file_or_url\n" unless -f $file_or_url;
+        use File::Spec;
+        my $abs = File::Spec->rel2abs($file_or_url);
+        my ($dir, $name) = $abs =~ m{^(.+)/([^/]+)$};
+        my $local_ip = _get_local_ip();
+        _start_http_server($dir, $CAST_PORT);
+        $url = "http://$local_ip:$CAST_PORT/$name";
+        print "Serving: $url\n";
+    }
+
     my $control_url = "http://$HOST:49152/avt_control";
     print "SetAVTransportURI: $url\n";
     my $ok = _dlna_set_uri($control_url, $url);
@@ -677,6 +786,7 @@ sub _soap_post {
     $req->content($body);
     my $res = $ua_plain->request($req);
     print STDERR "DLNA response: " . $res->status_line . "\n" if $DEBUG;
+    print STDERR "DLNA body: " . $res->content . "\n" if $DEBUG && !$res->is_success;
     return $res->is_success;
 }
 
@@ -686,6 +796,33 @@ sub _xml_escape {
     $s =~ s/</&lt;/g;
     $s =~ s/>/&gt;/g;
     return $s;
+}
+
+sub _start_http_server {
+    my ($dir, $port) = @_;
+    my $pidfile = "/tmp/philipstv-http.pid";
+
+    # Kill anything on this port
+    system("fuser -k $port/tcp >/dev/null 2>&1");
+    sleep 1;
+
+    my $pid = fork();
+    die "fork failed: $!\n" unless defined $pid;
+    if ($pid == 0) {
+        chdir $dir or die "Cannot chdir to $dir: $!\n";
+        open(STDOUT, '>/dev/null');
+        open(STDERR, '>/dev/null') unless $DEBUG;
+        exec('python3', '-m', 'http.server', "$port") or die "Cannot start HTTP server: $!\n";
+    }
+
+    # Save PID
+    open(my $fh, '>', $pidfile);
+    print $fh "$pid\n";
+    close($fh);
+
+    sleep 1;
+    print "HTTP server started on :$port (PID $pid, serving $dir)\n";
+    return $pid;
 }
 
 sub _get_local_ip {
