@@ -64,9 +64,11 @@ pass = your_password_here
 
 # DLNA Cast — play local files on TV
 ./philipstv.pl dlna-play video.mp4           # serve + play (auto HTTP server)
+./philipstv.pl dlna-play movie.mkv           # MKV with subtitles — works!
 ./philipstv.pl dlna-play http://url/video.mp4 # play URL directly
 ./philipstv.pl --nvenc cast video.mkv         # transcode with RTX GPU + play
 ./philipstv.pl dlna-status                    # DLNA transport state
+./philipstv.pl key Subtitle                   # switch subtitle track on TV
 
 # Wake on LAN
 ./philipstv.pl on                 # wake TV (magic packet)
