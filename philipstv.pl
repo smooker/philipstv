@@ -687,7 +687,7 @@ sub cmd_tv {
     #  window 2: remote — интерактивен контрол
     # Start built-in Perl HTTP server (fork, background)
     _start_http_server($serve_dir, $port);
-    system("tmux new-session -d -s tv -n http 'echo \"HTTP server on :$port serving $serve_dir\"; watch -n5 \"netstat -tn 2>/dev/null | grep $port || ss -tn | grep $port\"'");
+    system("tmux new-session -d -s tv -n http 'echo \"=== HTTP :$port — $serve_dir ===\"; while true; do ss -tn 2>/dev/null | grep $port | while read l; do echo \"\$(date +%H:%M:%S) \$l\"; done; sleep 2; done'");
     system("tmux new-window -t tv -n playlist 'cat $playlist; echo; echo \"Play: philipstv.pl dlna-play http://$local_ip:$port/FILENAME\"; echo \"Vol:  philipstv.pl vol+/vol-/mute\"; echo; bash'");
     # Write rc file with aliases
     my $rcfile = "/tmp/tv-remote.rc";
