@@ -18,6 +18,7 @@ use HTTP::Request;
 use MIME::Base64;
 use Digest::HMAC_SHA1;
 use Sys::Hostname;
+use Socket qw(inet_aton sockaddr_in);
 
 my $HOST     = '';
 my $PORT     = 1926;
@@ -27,6 +28,8 @@ my $PASS     = '';
 my $CONF     = '';
 my $DEBUG    = 0;
 my $HELP     = 0;
+my $NVENC    = 0;
+my $CAST_PORT = 8888;
 
 GetOptions(
     'host=s'   => \$HOST,
@@ -37,6 +40,8 @@ GetOptions(
     'conf=s'   => \$CONF,
     'debug'    => \$DEBUG,
     'help'     => \$HELP,
+    'nvenc'    => \$NVENC,
+    'cast-port=i' => \$CAST_PORT,
 ) or die "Bad options. Try --help\n";
 
 my $CMD  = shift @ARGV || '';
@@ -120,6 +125,10 @@ my %commands = (
     'settings'    => \&cmd_settings,
     'setting-get' => \&cmd_setting_get,
     'setting-set' => \&cmd_setting_set,
+    'cast'        => \&cmd_cast,
+    'stop-cast'   => \&cmd_stop_cast,
+    'dlna-status' => \&cmd_dlna_status,
+    'dlna-play'   => \&cmd_dlna_play_url,
 );
 
 if (my $fn = $commands{$CMD}) {
@@ -406,6 +415,288 @@ sub _delay {
     select(undef, undef, undef, $sec);
 }
 
+sub cmd_cast {
+    my ($file) = @_;
+    die "Usage: philipstv.pl [--nvenc] [--cast-port 8888] cast <file|url>\n" unless $file;
+
+    my $use_nvenc = $NVENC;
+    my $http_port = $CAST_PORT;
+
+    # Get local IP (same network as TV)
+    my $local_ip = _get_local_ip();
+    die "Cannot determine local IP\n" unless $local_ip;
+
+    # Build ffmpeg command
+    my $vcodec = $use_nvenc ? 'h264_nvenc -preset p4 -b:v 8M' : 'libx264 -preset fast -crf 23';
+    # Transcode to temp file, serve via HTTP
+    my $tmpdir = "/tmp/philipstv-cast";
+    system("mkdir -p $tmpdir");
+    my $outfile = "$tmpdir/stream.mp4";
+
+    my @ffcmd = (
+        'ffmpeg', '-y',
+        '-i', $file,
+        '-c:v', split(' ', $vcodec),
+        '-c:a', 'aac', '-b:a', '192k',
+        '-movflags', '+faststart',
+        $outfile,
+    );
+
+    print "ffmpeg: @ffcmd\n" if $DEBUG;
+
+    # Check if file needs transcoding
+    my $serve_file;
+    if ($file =~ /\.(mp4|mkv|avi|mov|ts|flv|wmv)$/i && !$use_nvenc) {
+        # Try serving original file directly (no transcode)
+        $serve_file = $file;
+        print "Serving original file (no transcode)\n";
+    } else {
+        # Transcode first
+        print "Transcoding with ffmpeg" . ($use_nvenc ? " (NVENC)" : "") . "...\n";
+        system(@ffcmd);
+        if ($? != 0) {
+            die "ffmpeg failed\n";
+        }
+        $serve_file = $outfile;
+        print "Transcode done: $serve_file\n";
+    }
+
+    # Start HTTP server (python3 simple)
+    my $serve_dir = $serve_file;
+    my $serve_name;
+    if ($serve_file =~ m{^(.+)/([^/]+)$}) {
+        $serve_dir = $1;
+        $serve_name = $2;
+    }
+
+    my $http_pid = fork();
+    die "fork failed: $!\n" unless defined $http_pid;
+    if ($http_pid == 0) {
+        chdir $serve_dir;
+        open(STDOUT, '>/dev/null');
+        open(STDERR, '>/dev/null') unless $DEBUG;
+        exec('python3', '-m', 'http.server', $http_port) or die "Cannot start HTTP server: $!\n";
+    }
+
+    sleep 1;
+    my $stream_url = "http://$local_ip:$http_port/$serve_name";
+    print "Stream URL: $stream_url\n";
+
+    # Send to TV via DLNA
+    print "Sending to TV via DLNA...\n";
+    _dlna_play($HOST, $stream_url);
+
+    print "Casting to $HOST — Ctrl+C to stop\n";
+
+    # Save PID for stop-cast
+    my $pidfile = "/tmp/philipstv-cast.pid";
+    open(my $fh, '>', $pidfile);
+    print $fh "$http_pid\n";
+    close($fh);
+
+    # Wait
+    waitpid($http_pid, 0);
+    unlink $pidfile;
+    print "Cast ended.\n";
+}
+
+sub cmd_stop_cast {
+    my $pidfile = "/tmp/philipstv-cast.pid";
+    if (-f $pidfile) {
+        open(my $fh, '<', $pidfile);
+        my $pid = <$fh>;
+        chomp $pid;
+        close($fh);
+        if ($pid && kill(0, $pid)) {
+            kill('TERM', $pid);
+            print "Stopped ffmpeg (PID $pid)\n";
+        }
+        unlink $pidfile;
+    } else {
+        print "No active cast found\n";
+    }
+    # Send Back key to exit TV browser/player
+    api_post('input/key', { key => 'Back' });
+}
+
+sub cmd_dlna_status {
+    my $control_url = "http://$HOST:49152/avt_control";
+    my $body = _soap_envelope('GetTransportInfo', '<InstanceID>0</InstanceID>');
+    my $ua_plain = LWP::UserAgent->new(timeout => 10);
+    my $req = HTTP::Request->new('POST', $control_url);
+    $req->header('Content-Type' => 'text/xml; charset="utf-8"');
+    $req->header('SOAPAction' => '"urn:schemas-upnp-org:service:AVTransport:1#GetTransportInfo"');
+    $req->content($body);
+    my $res = $ua_plain->request($req);
+    print "Status: " . $res->status_line . "\n";
+    print $res->content . "\n";
+}
+
+sub cmd_dlna_play_url {
+    my ($url) = @_;
+    die "Usage: philipstv.pl dlna-play <url>\n" unless $url;
+    my $control_url = "http://$HOST:49152/avt_control";
+    print "SetAVTransportURI: $url\n";
+    my $ok = _dlna_set_uri($control_url, $url);
+    print "SetURI: " . ($ok ? "OK" : "FAILED") . "\n";
+    if ($ok) {
+        sleep 1;
+        my $play_ok = _dlna_action($control_url, 'Play', '<Speed>1</Speed>');
+        print "Play: " . ($play_ok ? "OK" : "FAILED") . "\n";
+    }
+}
+
+sub _dlna_play {
+    my ($tv_ip, $url) = @_;
+
+    # Step 1: discover UPnP AVTransport service via SSDP
+    my $location = _ssdp_discover($tv_ip);
+    unless ($location) {
+        warn "DLNA: SSDP discovery failed, trying default location\n";
+        $location = "http://$tv_ip:49153/nmrDescription.xml";
+    }
+    print STDERR "DLNA location: $location\n" if $DEBUG;
+
+    # Step 2: find AVTransport control URL
+    my $control_url = _find_avtransport($location);
+    unless ($control_url) {
+        warn "DLNA: Cannot find AVTransport in XML, trying common paths\n";
+        my ($base) = $location =~ m{^(https?://[^/]+)};
+        for my $path ('/avt_control', '/upnp/control/AVTransport', '/AVTransport/control',
+                      '/dmr/control/AVTransport', '/MediaRenderer/AVTransport/Control') {
+            $control_url = "$base$path";
+            print STDERR "DLNA: trying $control_url\n" if $DEBUG;
+            if (_dlna_set_uri($control_url, $url)) {
+                _dlna_action($control_url, 'Play', '<Speed>1</Speed>');
+                print "DLNA: Playing on TV (via $path)\n";
+                return;
+            }
+        }
+        warn "DLNA: All paths failed\n";
+        return;
+    }
+
+    # Step 3: SetAVTransportURI
+    if (_dlna_set_uri($control_url, $url)) {
+        # Step 4: Play
+        _dlna_action($control_url, 'Play', '<Speed>1</Speed>');
+        print "DLNA: Playing on TV\n";
+    }
+}
+
+sub _ssdp_discover {
+    my ($tv_ip) = @_;
+    require IO::Socket::INET;
+
+    my $search = "M-SEARCH * HTTP/1.1\r\n" .
+                 "HOST: 239.255.255.250:1900\r\n" .
+                 "MAN: \"ssdp:discover\"\r\n" .
+                 "MX: 3\r\n" .
+                 "ST: urn:schemas-upnp-org:service:AVTransport:1\r\n\r\n";
+
+    my $sock = IO::Socket::INET->new(
+        Proto => 'udp',
+        LocalPort => 0,
+        Timeout => 3,
+    ) or return undef;
+
+    my $dest = sockaddr_in(1900, inet_aton($tv_ip));
+    $sock->send($search, 0, $dest);
+
+    my $buf;
+    eval {
+        local $SIG{ALRM} = sub { die "timeout\n" };
+        alarm 3;
+        $sock->recv($buf, 4096);
+        alarm 0;
+    };
+    $sock->close;
+
+    if ($buf && $buf =~ /LOCATION:\s*(\S+)/i) {
+        return $1;
+    }
+    return undef;
+}
+
+sub _find_avtransport {
+    my ($location) = @_;
+    my $ua_plain = LWP::UserAgent->new(timeout => 5);
+    my $res = $ua_plain->get($location);
+    return undef unless $res->is_success;
+
+    my $xml = $res->content;
+    my ($base) = $location =~ m{^(https?://[^/]+)};
+
+    # Find AVTransport controlURL from description XML
+    if ($xml =~ m{<controlURL>(/avt_control)</controlURL>}s ||
+        $xml =~ m{AVTransport.*?<controlURL>([^<]+)</controlURL>}s ||
+        $xml =~ m{<controlURL>([^<]*avt[^<]*)</controlURL>}si) {
+        my $path = $1;
+        $path = "$base$path" unless $path =~ /^https?:/;
+        return $path;
+    }
+    return undef;
+}
+
+sub _dlna_set_uri {
+    my ($control_url, $media_url) = @_;
+    my $body = _soap_envelope('SetAVTransportURI',
+        '<InstanceID>0</InstanceID>' .
+        '<CurrentURI>' . _xml_escape($media_url) . '</CurrentURI>' .
+        '<CurrentURIMetaData></CurrentURIMetaData>'
+    );
+    return _soap_post($control_url, 'SetAVTransportURI', $body);
+}
+
+sub _dlna_action {
+    my ($control_url, $action, $args) = @_;
+    $args ||= '';
+    my $body = _soap_envelope($action, "<InstanceID>0</InstanceID>$args");
+    return _soap_post($control_url, $action, $body);
+}
+
+sub _soap_envelope {
+    my ($action, $body) = @_;
+    return '<?xml version="1.0" encoding="utf-8"?>' .
+           '<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" ' .
+           's:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">' .
+           '<s:Body>' .
+           '<u:' . $action . ' xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">' .
+           $body .
+           '</u:' . $action . '>' .
+           '</s:Body></s:Envelope>';
+}
+
+sub _soap_post {
+    my ($url, $action, $body) = @_;
+    print STDERR "DLNA SOAP: $action → $url\n" if $DEBUG;
+    my $ua_plain = LWP::UserAgent->new(timeout => 10);
+    my $req = HTTP::Request->new('POST', $url);
+    $req->header('Content-Type' => 'text/xml; charset="utf-8"');
+    $req->header('SOAPAction' => "\"urn:schemas-upnp-org:service:AVTransport:1#$action\"");
+    $req->content($body);
+    my $res = $ua_plain->request($req);
+    print STDERR "DLNA response: " . $res->status_line . "\n" if $DEBUG;
+    return $res->is_success;
+}
+
+sub _xml_escape {
+    my ($s) = @_;
+    $s =~ s/&/&amp;/g;
+    $s =~ s/</&lt;/g;
+    $s =~ s/>/&gt;/g;
+    return $s;
+}
+
+sub _get_local_ip {
+    # Find local IP on same network as TV
+    my $output = `ip route get $HOST 2>/dev/null`;
+    if ($output =~ /src\s+(\d+\.\d+\.\d+\.\d+)/) {
+        return $1;
+    }
+    return undef;
+}
+
 sub cmd_pair {
     # Step 1: Get system info first (for featuring data)
     my $ua_noauth = LWP::UserAgent->new(
@@ -627,6 +918,10 @@ Commands:
   settings         Show settings tree with node IDs
   setting-get <id> Get setting value by node ID
   setting-set <id> '<json>' Set setting value
+
+  cast <file|url>  Stream video to TV via ffmpeg HTTP + JointSpace
+                   Options: --nvenc (RTX GPU encode), --port N (default 8888)
+  stop-cast        Stop active cast
 
   get <path>       Raw GET from API path
   post <path> '<json>' Raw POST to API path
