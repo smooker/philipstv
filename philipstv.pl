@@ -710,12 +710,49 @@ sub cmd_tv {
     print $rc "alias dlna-play='$script dlna-play'\n";
     print $rc "alias dlna-status='$script dlna-status'\n";
     print $rc "alias status='$script status'\n";
-    print $rc "echo '=== TV Remote ==='\n";
-    print $rc "echo 'vol+ vol- mute unmute pause play stop'\n";
-    print $rc "echo 'dlna-play FILE | dlna-status | status'\n";
-    print $rc "echo 'tv vol 20 | tv key Home | tv ch nova'\n";
-    print $rc "echo ''\n";
+    print $rc "echo '=== TV Remote (arrow up for commands) ==='\n";
     close($rc);
+
+    # Pre-populate history with all commands (newest last = first on arrow-up)
+    my $histfile = "/tmp/tv-remote.history";
+    open(my $hf, '>', $histfile);
+    my @cmds = (
+        'tv system',
+        'tv settings',
+        'tv channels',
+        'tv-screen 1920x1080',
+        'tv-screen-stop',
+        'tv get audio/volume',
+        'tv screen On',
+        'tv screen Off',
+        'tv hdmi 1',
+        'tv ch nova',
+        'tv key Home',
+        'tv key Back',
+        'tv key Confirm',
+        'tv key CursorUp',
+        'tv key CursorDown',
+        'tv key Subtitle',
+        'DISPLAY=:1 firefox &',
+        'DISPLAY=:1 vlc movie.mp4 &',
+        'DISPLAY=:1 xterm &',
+        'dlna-play ~/Videos/',
+        'dlna-status',
+        'on',
+        'wol',
+        'stop',
+        'pause',
+        'play',
+        'unmute',
+        'mute',
+        'vol-',
+        'vol+',
+        'tv vol 20',
+        'helptv',
+        'status',
+    );
+    print $hf "$_\n" for @cmds;
+    close($hf);
     system("tmux new-window -t tv -n remote 'bash --rcfile $rcfile'");
 
     # If specific file given, play it
