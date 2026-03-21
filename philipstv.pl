@@ -84,8 +84,8 @@ if ($CONFFILE && -f $CONFFILE) {
     close($fh);
 }
 
-die "Error: --host is required (or set host in ~/.philipstv.conf)\n" unless $HOST;
-if ($CMD ne 'pair') {
+die "Error: --host is required (or set host in ~/.philipstv.conf)\n" unless $HOST || $CMD eq 'serve';
+if ($CMD ne 'pair' && $CMD ne 'serve') {
     die "Error: --user and --pass required (or run 'pair' first)\n" unless $USER && $PASS;
 }
 
@@ -137,6 +137,7 @@ my %commands = (
     'helptv'      => \&cmd_helptv,
     'tv-screen'   => \&cmd_tv_screen,
     'tv-screen-stop' => \&cmd_tv_screen_stop,
+    'serve'           => \&cmd_serve,
 );
 
 if (my $fn = $commands{$CMD}) {
@@ -487,20 +488,31 @@ sub cmd_cast {
 }
 
 sub cmd_stop_cast {
-    my $pidfile = "/tmp/philipstv-cast.pid";
-    if (-f $pidfile) {
-        open(my $fh, '<', $pidfile);
-        my $pid = <$fh>;
-        chomp $pid;
-        close($fh);
+    # Stop HTTP server
+    my $http_pidfile = "/tmp/philipstv-http.pid";
+    if (-f $http_pidfile) {
+        open(my $fh, '<', $http_pidfile);
+        my $pid = <$fh>; chomp $pid; close $fh;
+        if ($pid && kill(0, $pid)) {
+            kill('TERM', $pid);
+            print "Stopped HTTP server (PID $pid)\n";
+        }
+        unlink $http_pidfile;
+        unlink "/tmp/philipstv-http.dir";
+    }
+
+    # Stop ffmpeg cast
+    my $cast_pidfile = "/tmp/philipstv-cast.pid";
+    if (-f $cast_pidfile) {
+        open(my $fh, '<', $cast_pidfile);
+        my $pid = <$fh>; chomp $pid; close $fh;
         if ($pid && kill(0, $pid)) {
             kill('TERM', $pid);
             print "Stopped ffmpeg (PID $pid)\n";
         }
-        unlink $pidfile;
-    } else {
-        print "No active cast found\n";
+        unlink $cast_pidfile;
     }
+
     # Send Back key to exit TV browser/player
     api_post('input/key', { key => 'Back' });
 }
@@ -621,6 +633,51 @@ sub cmd_tv_screen_stop {
     system("tmux kill-window -t tv:screen 2>/dev/null");
 }
 
+sub cmd_serve {
+    my ($dir) = @_;
+    $dir ||= '.';
+    use File::Spec;
+    $dir = File::Spec->rel2abs($dir);
+    my $port = $CAST_PORT;
+
+    chdir $dir or die "Cannot chdir to $dir: $!\n";
+    $| = 1;  # autoflush
+    $SIG{CHLD} = 'IGNORE';
+
+    # Write pidfile so _start_http_server can detect us
+    my $pidfile = "/tmp/philipstv-http.pid";
+    my $dirfile = "/tmp/philipstv-http.dir";
+    open(my $pf, '>', $pidfile); print $pf "$$\n"; close $pf;
+    open(my $df, '>', $dirfile); print $df "$dir\n"; close $df;
+
+    # Clean up pidfile on exit
+    $SIG{TERM} = $SIG{INT} = sub { unlink $pidfile, $dirfile; exit 0; };
+
+    require IO::Socket::INET;
+    my $srv = IO::Socket::INET->new(
+        LocalAddr => '0.0.0.0',
+        LocalPort => $port,
+        Listen    => 10,
+        ReuseAddr => 1,
+        Proto     => 'tcp',
+    ) or die "Cannot bind :$port: $!\n";
+
+    print "=== HTTP server on :$port (PID $$) ===\n";
+    print "Serving: $dir\n";
+    print "---\n";
+
+    while (my $client = $srv->accept()) {
+        my $child = fork();
+        if ($child == 0) {
+            close $srv;
+            _http_handle($client, $dir);
+            close $client;
+            exit 0;
+        }
+        close $client;
+    }
+}
+
 sub cmd_wol {
     die "No MAC address — set mac in ~/.philipstv.conf\n" unless $MAC;
     $MAC =~ s/[:-]//g;
@@ -686,7 +743,7 @@ sub cmd_tv {
     #  window 0: http — server с видими requests
     #  window 1: playlist — файлове за избор
     #  window 2: remote — интерактивен контрол
-    system("tmux new-session -d -s tv -n http 'cd \"$serve_dir\" && python3 -m http.server $port'");
+    system("tmux new-session -d -s tv -n http '$script --cast-port $port serve \"$serve_dir\"'");
     system("tmux new-window -t tv -n playlist 'cat $playlist; echo; echo \"Play: philipstv.pl dlna-play http://$local_ip:$port/FILENAME\"; echo \"Vol:  philipstv.pl vol+/vol-/mute\"; echo; bash'");
     # Write rc file with aliases
     my $rcfile = "/tmp/tv-remote.rc";
@@ -969,18 +1026,42 @@ sub _xml_escape {
 sub _start_http_server {
     my ($dir, $port) = @_;
     my $pidfile = "/tmp/philipstv-http.pid";
+    my $dirfile = "/tmp/philipstv-http.dir";
 
-    # Kill anything on this port
+    # Check if server already running on same dir
+    if (-f $pidfile) {
+        open(my $fh, '<', $pidfile);
+        my $old_pid = <$fh>; chomp $old_pid; close $fh;
+        if ($old_pid && kill(0, $old_pid)) {
+            my $old_dir = '';
+            if (-f $dirfile) {
+                open(my $df, '<', $dirfile);
+                $old_dir = <$df>; chomp $old_dir; close $df;
+            }
+            if ($old_dir eq $dir) {
+                print "HTTP server already running on :$port (PID $old_pid)\n";
+                return $old_pid;
+            }
+            # Different dir — kill old server
+            kill('TERM', $old_pid);
+            sleep 1;
+        }
+    }
+
+    # Kill anything else on this port
     system("fuser -k $port/tcp >/dev/null 2>&1");
     sleep 1;
 
     my $pid = fork();
     die "fork failed: $!\n" unless defined $pid;
     if ($pid == 0) {
+        open(STDOUT, '>/dev/null');
+        open(STDERR, '>/dev/null');
         chdir $dir or die "Cannot chdir to $dir: $!\n";
-        $SIG{CHLD} = 'IGNORE';  # auto-reap children
+        $SIG{CHLD} = 'IGNORE';
 
         my $srv = IO::Socket::INET->new(
+            LocalAddr => '0.0.0.0',
             LocalPort => $port,
             Listen    => 10,
             ReuseAddr => 1,
@@ -1000,10 +1081,13 @@ sub _start_http_server {
         exit 0;
     }
 
-    # Save PID
+    # Save PID and dir
     open(my $fh, '>', $pidfile);
     print $fh "$pid\n";
     close($fh);
+    open(my $df, '>', $dirfile);
+    print $df "$dir\n";
+    close($df);
 
     sleep 1;
     print "HTTP server started on :$port (PID $pid, serving $dir)\n";
@@ -1013,35 +1097,45 @@ sub _start_http_server {
 sub _http_handle {
     my ($client, $dir) = @_;
 
+    my $peer = $client->peerhost || '-';
     local $/ = "\r\n";
     my $request_line = <$client>;
     return unless $request_line;
     chomp $request_line;
 
     my ($method, $path) = $request_line =~ m{^(GET|HEAD)\s+(/\S*)\s+HTTP/};
-    return unless $method && $path;
+    unless ($method && $path) {
+        _http_log($peer, $request_line, 400, 0);
+        return;
+    }
 
-    # Read and discard headers
+    # Read and log headers
+    my $range_hdr = '';
+    _http_log($peer, "$method $path", 0, 0);
     while (my $hdr = <$client>) {
         chomp $hdr;
         last if $hdr eq '';
+        printf "  %s\n", $hdr;
+        $range_hdr = $1 if $hdr =~ /^Range:\s*(.*)/i;
     }
 
     # URL decode
-    $path =~ s/%([0-9A-Fa-f]{2})/chr(hex($1))/ge;
-    $path =~ s{^/}{};
-    $path =~ s{\.\./}{}g;  # prevent traversal
+    my $decoded = $path;
+    $decoded =~ s/%([0-9A-Fa-f]{2})/chr(hex($1))/ge;
+    $decoded =~ s{^/}{};
+    $decoded =~ s{\.\./}{}g;  # prevent traversal
 
-    my $file = "$dir/$path";
+    my $file = "$dir/$decoded";
 
     unless (-f $file && -r $file) {
         print $client "HTTP/1.1 404 Not Found\r\n";
         print $client "Content-Length: 0\r\n";
         print $client "Connection: close\r\n\r\n";
+        printf "  -> 404\n";
         return;
     }
 
-    my $size = -s $file;
+    my $total = -s $file;
     my $ext = ($file =~ /\.(\w+)$/)[0] || '';
     my %mime = (
         mp4 => 'video/mp4', mkv => 'video/x-matroska', avi => 'video/x-msvideo',
@@ -1051,20 +1145,64 @@ sub _http_handle {
     );
     my $ct = $mime{lc $ext} || 'application/octet-stream';
 
-    print $client "HTTP/1.1 200 OK\r\n";
+    my ($start, $end) = (0, $total - 1);
+    my $status = 200;
+
+    if ($range_hdr =~ /bytes=(\d*)-(\d*)/) {
+        my ($rs, $re) = ($1, $2);
+        if ($rs ne '') {
+            $start = int($rs);
+            $end = ($re ne '') ? int($re) : $total - 1;
+        } elsif ($re ne '') {
+            # bytes=-500 means last 500 bytes
+            $start = $total - int($re);
+            $start = 0 if $start < 0;
+        }
+        $end = $total - 1 if $end >= $total;
+        $status = 206;
+    }
+
+    my $content_length = $end - $start + 1;
+
+    if ($status == 206) {
+        print $client "HTTP/1.1 206 Partial Content\r\n";
+        print $client "Content-Range: bytes $start-$end/$total\r\n";
+    } else {
+        print $client "HTTP/1.1 200 OK\r\n";
+    }
     print $client "Content-Type: $ct\r\n";
-    print $client "Content-Length: $size\r\n";
+    print $client "Content-Length: $content_length\r\n";
     print $client "Accept-Ranges: bytes\r\n";
     print $client "Connection: close\r\n\r\n";
 
+    my $human = $content_length > 1048576 ? sprintf("%.1fM", $content_length/1048576)
+              : $content_length > 1024    ? sprintf("%.0fK", $content_length/1024)
+              : "${content_length}B";
+    printf "  -> %d %s", $status, $human;
+    printf " [%d-%d/%d]", $start, $end, $total if $status == 206;
+    print "\n";
+
     if ($method eq 'GET') {
         open(my $fh, '<:raw', $file) or return;
+        seek($fh, $start, 0) if $start > 0;
+        my $remaining = $content_length;
         my $buf;
-        while (read($fh, $buf, 65536)) {
+        while ($remaining > 0 && (my $n = read($fh, $buf, $remaining > 65536 ? 65536 : $remaining))) {
             print $client $buf or last;
+            $remaining -= $n;
         }
         close $fh;
     }
+}
+
+sub _http_log {
+    my ($peer, $request, $status, $size) = @_;
+    my @t = localtime;
+    my $human_size = $size > 1048576 ? sprintf("%.1fM", $size / 1048576)
+                   : $size > 1024    ? sprintf("%.0fK", $size / 1024)
+                   : "${size}B";
+    printf "%02d:%02d:%02d %s \"%s\" %d %s\n",
+        $t[2], $t[1], $t[0], $peer, $request, $status, $human_size;
 }
 
 sub _get_local_ip {
