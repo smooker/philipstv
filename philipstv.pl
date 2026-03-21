@@ -471,7 +471,9 @@ sub cmd_cast {
     my ($serve_dir, $serve_name) = $serve_file =~ m{^(.+)/([^/]+)$};
     _start_http_server($serve_dir, $http_port);
 
-    my $stream_url = "http://$local_ip:$http_port/$serve_name";
+    my $encoded_name = $serve_name;
+    $encoded_name =~ s/([^A-Za-z0-9._~-])/sprintf("%%%02X", ord($1))/ge;
+    my $stream_url = "http://$local_ip:$http_port/$encoded_name";
     print "Stream URL: $stream_url\n";
 
     # Send to TV via DLNA
@@ -641,7 +643,9 @@ sub cmd_tv {
     if (-f $abs) {
         my ($name) = $abs =~ m{([^/]+)$};
         sleep 1;
-        my $url = "http://$local_ip:$port/$name";
+        my $ename = $name;
+        $ename =~ s/([^A-Za-z0-9._~-])/sprintf("%%%02X", ord($1))/ge;
+        my $url = "http://$local_ip:$port/$ename";
         print "Playing: $url\n";
         _dlna_play($HOST, $url);
         system("tmux send-keys -t tv:remote '$script dlna-status' Enter");
@@ -672,7 +676,9 @@ sub cmd_dlna_play_url {
         my ($dir, $name) = $abs =~ m{^(.+)/([^/]+)$};
         my $local_ip = _get_local_ip();
         _start_http_server($dir, $CAST_PORT);
-        $url = "http://$local_ip:$CAST_PORT/$name";
+        my $encoded = $name;
+        $encoded =~ s/([^A-Za-z0-9._~-])/sprintf("%%%02X", ord($1))/ge;
+        $url = "http://$local_ip:$CAST_PORT/$encoded";
         print "Serving: $url\n";
     }
 
