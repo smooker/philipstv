@@ -84,8 +84,8 @@ if ($CONFFILE && -f $CONFFILE) {
     close($fh);
 }
 
-die "Error: --host is required (or set host in ~/.philipstv.conf)\n" unless $HOST || $CMD eq 'serve';
-if ($CMD ne 'pair' && $CMD ne 'serve') {
+die "Error: --host is required (or set host in ~/.philipstv.conf)\n" unless $HOST || $CMD eq 'serve' || $CMD eq 'kill';
+if ($CMD ne 'pair' && $CMD ne 'serve' && $CMD ne 'kill') {
     die "Error: --user and --pass required (or run 'pair' first)\n" unless $USER && $PASS;
 }
 
@@ -138,6 +138,7 @@ my %commands = (
     'tv-screen'   => \&cmd_tv_screen,
     'tv-screen-stop' => \&cmd_tv_screen_stop,
     'serve'           => \&cmd_serve,
+    'kill'            => \&cmd_kill,
 );
 
 if (my $fn = $commands{$CMD}) {
@@ -556,7 +557,7 @@ sub cmd_helptv {
   screen On/Off     Display on/off
 
   tv-screen [RES]   Virtual X screen on TV (Xephyr + NVENC capture)
-                    Default 1920x1080. Run apps: DISPLAY=:1 firefox
+                    Default 1920x1080. Run apps: DISPLAY=:9 firefox
   tv-screen-stop    Stop virtual screen
 
   system            Model, firmware, API version
@@ -567,13 +568,13 @@ TV
 sub cmd_tv_screen {
     my ($res) = @_;
     $res ||= '1920x1080';
-    my $disp = ':1';
+    my $disp = ':9';
 
     # Prevent double run
-    my $check = `pgrep -f "Xephyr $disp" 2>/dev/null`;
+    my $check = `pgrep -x Xephyr 2>/dev/null`;
     if ($check && $check =~ /\d+/) {
         chomp $check;
-        print "Xephyr already running on $disp (PID $check)\n";
+        print "Xephyr already running (PID $check)\n";
         print "Use: tv-screen-stop to kill it first\n";
         return;
     }
@@ -591,55 +592,69 @@ sub cmd_tv_screen {
         system("tmux new-session -d -s tv -n remote 'bash'");
     }
 
-    # Window: screen — Xephyr + WM + xterm
-    my $screen_cmd = join('; ',
-        "echo '=== TV Screen: $disp ($res) ==='",
-        "Xephyr $disp -screen $res -resizeable -no-host-grab &",
-        "sleep 2",
-        "DISPLAY=$disp xfwm4 &",
-        "DISPLAY=$disp xterm &",
-        "echo 'Xephyr running. DISPLAY=$disp'",
-        "bash",
-    );
-    system("tmux new-window -t tv -n screen '$screen_cmd'");
+    # Window: xephyr — Xephyr foreground
+    system("tmux new-window -t tv -n xephyr");
+    system("tmux send-keys -t tv:xephyr 'Xephyr $disp -screen $res -resizeable -no-host-grab' Enter");
 
-    # Window: ffmpeg — NVENC capture
-    my $ffmpeg_cmd = join('; ',
-        "echo '=== NVENC Capture: $disp ($res) -> :$port ==='",
-        "sleep 3",
-        "DISPLAY=$disp ffmpeg -f x11grab -framerate 25 -video_size $res -i $disp " .
-            "-c:v h264_nvenc -preset p4 -b:v 10M -g 50 " .
-            "-movflags +frag_keyframe+empty_moov+default_base_moof " .
-            "-f mp4 -listen 1 http://0.0.0.0:$port",
-        "echo '>>> Capture ended'",
-        "bash",
-    );
-    system("tmux new-window -t tv -n ffmpeg '$ffmpeg_cmd'");
-    system("tmux set-option -t tv:ffmpeg remain-on-exit on");
+    # Window: apps — WM + terminal on Xephyr
+    system("tmux new-window -t tv -n apps");
+    system("tmux send-keys -t tv:apps 'sleep 3; DISPLAY=$disp openbox &' Enter");
+    system("tmux send-keys -t tv:apps 'sleep 4; DISPLAY=$disp xfce4-terminal &' Enter");
 
-    sleep 5;
+    # Window: ffmpeg — NVENC capture to file
+    my $live_file = "/tmp/philipstv-cast/screen.mp4";
+    system("mkdir -p /tmp/philipstv-cast");
+    system("tmux new-window -t tv -n ffmpeg");
+    system("tmux send-keys -t tv:ffmpeg 'sleep 5 && RES=\$(DISPLAY=$disp xdpyinfo | grep dimensions | awk \"{ print \\\$2 }\") && echo \"Capture: \$RES\" && DISPLAY=$disp ffmpeg -y -f x11grab -framerate 25 -video_size \$RES -i $disp -c:v h264_nvenc -preset p4 -b:v 10M -g 50 -movflags +frag_keyframe+empty_moov+default_base_moof -f mp4 $live_file' Enter");
 
-    # DLNA play
-    my $url = "http://$local_ip:$port";
+    # Write live flag
+    open(my $lf, '>', '/tmp/philipstv-live');
+    print $lf "$live_file\n";
+    close($lf);
+
+    # Window: http — serve with logging
+    my $serve_dir = '/tmp/philipstv-cast';
+    my $script = File::Spec->rel2abs($0);
+    system("tmux new-window -t tv -n http");
+    system("tmux send-keys -t tv:http '$script --cast-port $CAST_PORT serve $serve_dir' Enter");
+
+    # Wait for ffmpeg to write enough data
+    print "Waiting for capture data...\n";
+    my $ready = 0;
+    for my $i (1..30) {
+        sleep 1;
+        my $sz = -s $live_file || 0;
+        if ($sz > 100000) {  # 100KB minimum
+            printf "Ready: %dKB captured\n", $sz / 1024;
+            $ready = 1;
+            last;
+        }
+    }
+    unless ($ready) {
+        warn "Warning: capture file still small, trying anyway\n";
+    }
+
+    # DLNA play via our HTTP server
+    my $url = "http://$local_ip:$CAST_PORT/screen.mp4";
     print "Stream: $url\n";
     _dlna_play($HOST, $url);
 
     print "=== TV Screen Active ===\n";
     print "Display: DISPLAY=$disp\n";
-    print "Stream:  http://$local_ip:$port\n";
+    print "Stream:  $url\n";
     print "Run:     DISPLAY=$disp firefox &\n";
     print "         DISPLAY=$disp vlc movie.mp4 &\n";
-    print "tmux:    attach -t tv (windows: screen, ffmpeg)\n";
+    print "tmux:    attach -t tv (windows: xephyr, apps, ffmpeg, http)\n";
 }
 
 sub cmd_tv_screen_stop {
-    my $disp = ':1';
-    system("pkill -f 'Xephyr $disp'");
-    system("fuser -k " . ($CAST_PORT + 1) . "/tcp 2>/dev/null");
+    system("pkill -x Xephyr");
+    system("pkill -x openbox");
+    unlink "/tmp/philipstv-live";
     print "TV screen stopped\n";
-    # Kill tmux windows
     system("tmux kill-window -t tv:ffmpeg 2>/dev/null");
-    system("tmux kill-window -t tv:screen 2>/dev/null");
+    system("tmux kill-window -t tv:xephyr 2>/dev/null");
+    system("tmux kill-window -t tv:apps 2>/dev/null");
 }
 
 sub cmd_serve {
@@ -685,6 +700,14 @@ sub cmd_serve {
         }
         close $client;
     }
+}
+
+sub cmd_kill {
+    system("tmux kill-session -t tv 2>/dev/null");
+    system("pkill -x Xephyr 2>/dev/null");
+    unlink "/tmp/philipstv-http.pid";
+    unlink "/tmp/philipstv-http.dir";
+    print "Killed tv session\n";
 }
 
 sub cmd_wol {
@@ -1168,53 +1191,94 @@ sub _http_handle {
     );
     my $ct = $mime{lc $ext} || 'application/octet-stream';
 
-    my ($start, $end) = (0, $total - 1);
-    my $status = 200;
-
-    if ($range_hdr =~ /bytes=(\d*)-(\d*)/) {
-        my ($rs, $re) = ($1, $2);
-        if ($rs ne '') {
-            $start = int($rs);
-            $end = ($re ne '') ? int($re) : $total - 1;
-        } elsif ($re ne '') {
-            # bytes=-500 means last 500 bytes
-            $start = $total - int($re);
-            $start = 0 if $start < 0;
-        }
-        $end = $total - 1 if $end >= $total;
-        $status = 206;
+    # Check if this is a live stream file
+    my $is_live = 0;
+    my $live_flag = "/tmp/philipstv-live";
+    if (-f $live_flag) {
+        open(my $lf, '<', $live_flag);
+        my $live_file = <$lf>; close $lf;
+        $live_file =~ s/\s+$//;
+        $is_live = 1 if $live_file eq $file;
     }
 
-    my $content_length = $end - $start + 1;
-
-    if ($status == 206) {
-        print $client "HTTP/1.1 206 Partial Content\r\n";
-        print $client "Content-Range: bytes $start-$end/$total\r\n";
-    } else {
+    if ($is_live) {
+        # Live mode: HEAD returns current size, GET streams with tail-follow
         print $client "HTTP/1.1 200 OK\r\n";
-    }
-    print $client "Content-Type: $ct\r\n";
-    print $client "Content-Length: $content_length\r\n";
-    print $client "Accept-Ranges: bytes\r\n";
-    print $client "Connection: close\r\n\r\n";
+        print $client "Content-Type: $ct\r\n";
+        print $client "Content-Length: $total\r\n";
+        print $client "Accept-Ranges: bytes\r\n";
+        print $client "Connection: close\r\n\r\n";
+        printf "  -> 200 LIVE (%s)\n", $total > 1048576 ? sprintf("%.1fM", $total/1048576) : "${total}B";
 
-    my $human = $content_length > 1048576 ? sprintf("%.1fM", $content_length/1048576)
-              : $content_length > 1024    ? sprintf("%.0fK", $content_length/1024)
-              : "${content_length}B";
-    printf "  -> %d %s", $status, $human;
-    printf " [%d-%d/%d]", $start, $end, $total if $status == 206;
-    print "\n";
-
-    if ($method eq 'GET') {
-        open(my $fh, '<:raw', $file) or return;
-        seek($fh, $start, 0) if $start > 0;
-        my $remaining = $content_length;
-        my $buf;
-        while ($remaining > 0 && (my $n = read($fh, $buf, $remaining > 65536 ? 65536 : $remaining))) {
-            print $client $buf or last;
-            $remaining -= $n;
+        if ($method eq 'GET') {
+            open(my $fh, '<:raw', $file) or return;
+            my $buf;
+            my $stale = 0;
+            my $sent = 0;
+            while ($stale < 30) {
+                my $n = read($fh, $buf, 65536);
+                if ($n && $n > 0) {
+                    print $client $buf or last;
+                    $sent += $n;
+                    $stale = 0;
+                } else {
+                    select(undef, undef, undef, 0.5);
+                    $stale++;
+                }
+            }
+            close $fh;
+            my $human = $sent > 1048576 ? sprintf("%.1fM", $sent/1048576) : "${sent}B";
+            printf "  [live ended: %s sent]\n", $human;
         }
-        close $fh;
+    } else {
+        # Normal mode: Content-Length + Range support
+        my ($start, $end) = (0, $total - 1);
+        my $status = 200;
+
+        if ($range_hdr =~ /bytes=(\d*)-(\d*)/) {
+            my ($rs, $re) = ($1, $2);
+            if ($rs ne '') {
+                $start = int($rs);
+                $end = ($re ne '') ? int($re) : $total - 1;
+            } elsif ($re ne '') {
+                $start = $total - int($re);
+                $start = 0 if $start < 0;
+            }
+            $end = $total - 1 if $end >= $total;
+            $status = 206;
+        }
+
+        my $content_length = $end - $start + 1;
+
+        if ($status == 206) {
+            print $client "HTTP/1.1 206 Partial Content\r\n";
+            print $client "Content-Range: bytes $start-$end/$total\r\n";
+        } else {
+            print $client "HTTP/1.1 200 OK\r\n";
+        }
+        print $client "Content-Type: $ct\r\n";
+        print $client "Content-Length: $content_length\r\n";
+        print $client "Accept-Ranges: bytes\r\n";
+        print $client "Connection: close\r\n\r\n";
+
+        my $human = $content_length > 1048576 ? sprintf("%.1fM", $content_length/1048576)
+                  : $content_length > 1024    ? sprintf("%.0fK", $content_length/1024)
+                  : "${content_length}B";
+        printf "  -> %d %s", $status, $human;
+        printf " [%d-%d/%d]", $start, $end, $total if $status == 206;
+        print "\n";
+
+        if ($method eq 'GET') {
+            open(my $fh, '<:raw', $file) or return;
+            seek($fh, $start, 0) if $start > 0;
+            my $remaining = $content_length;
+            my $buf;
+            while ($remaining > 0 && (my $n = read($fh, $buf, $remaining > 65536 ? 65536 : $remaining))) {
+                print $client $buf or last;
+                $remaining -= $n;
+            }
+            close $fh;
+        }
     }
 }
 
