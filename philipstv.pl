@@ -787,6 +787,8 @@ sub _find_avtransport {
 
 sub _dlna_set_uri {
     my ($control_url, $media_url) = @_;
+    # Stop current playback first
+    _dlna_action($control_url, 'Stop', '');
     $media_url = _url_encode_path($media_url);
     my $body = _soap_envelope('SetAVTransportURI',
         '<InstanceID>0</InstanceID>' .
