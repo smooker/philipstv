@@ -978,14 +978,26 @@ sub _start_http_server {
     die "fork failed: $!\n" unless defined $pid;
     if ($pid == 0) {
         chdir $dir or die "Cannot chdir to $dir: $!\n";
-        open(STDOUT, '>/dev/null');
-        open(STDERR, '>/dev/null') unless $DEBUG;
-        exec('python3', '-c',
-            "from http.server import HTTPServer, SimpleHTTPRequestHandler; " .
-            "from socketserver import ThreadingMixIn; " .
-            "class T(ThreadingMixIn, HTTPServer): pass; " .
-            "T(('', $port), SimpleHTTPRequestHandler).serve_forever()"
-        ) or die "Cannot start HTTP server: $!\n";
+        $SIG{CHLD} = 'IGNORE';  # auto-reap children
+
+        my $srv = IO::Socket::INET->new(
+            LocalPort => $port,
+            Listen    => 10,
+            ReuseAddr => 1,
+            Proto     => 'tcp',
+        ) or die "Cannot bind :$port: $!\n";
+
+        while (my $client = $srv->accept()) {
+            my $child = fork();
+            if ($child == 0) {
+                close $srv;
+                _http_handle($client, $dir);
+                close $client;
+                exit 0;
+            }
+            close $client;
+        }
+        exit 0;
     }
 
     # Save PID
@@ -996,6 +1008,63 @@ sub _start_http_server {
     sleep 1;
     print "HTTP server started on :$port (PID $pid, serving $dir)\n";
     return $pid;
+}
+
+sub _http_handle {
+    my ($client, $dir) = @_;
+
+    local $/ = "\r\n";
+    my $request_line = <$client>;
+    return unless $request_line;
+    chomp $request_line;
+
+    my ($method, $path) = $request_line =~ m{^(GET|HEAD)\s+(/\S*)\s+HTTP/};
+    return unless $method && $path;
+
+    # Read and discard headers
+    while (my $hdr = <$client>) {
+        chomp $hdr;
+        last if $hdr eq '';
+    }
+
+    # URL decode
+    $path =~ s/%([0-9A-Fa-f]{2})/chr(hex($1))/ge;
+    $path =~ s{^/}{};
+    $path =~ s{\.\./}{}g;  # prevent traversal
+
+    my $file = "$dir/$path";
+
+    unless (-f $file && -r $file) {
+        print $client "HTTP/1.1 404 Not Found\r\n";
+        print $client "Content-Length: 0\r\n";
+        print $client "Connection: close\r\n\r\n";
+        return;
+    }
+
+    my $size = -s $file;
+    my $ext = ($file =~ /\.(\w+)$/)[0] || '';
+    my %mime = (
+        mp4 => 'video/mp4', mkv => 'video/x-matroska', avi => 'video/x-msvideo',
+        webm => 'video/webm', mov => 'video/quicktime', ts => 'video/mp2t',
+        mp3 => 'audio/mpeg', flac => 'audio/flac', ogg => 'audio/ogg',
+        wav => 'audio/wav', m4a => 'audio/mp4', srt => 'text/plain',
+    );
+    my $ct = $mime{lc $ext} || 'application/octet-stream';
+
+    print $client "HTTP/1.1 200 OK\r\n";
+    print $client "Content-Type: $ct\r\n";
+    print $client "Content-Length: $size\r\n";
+    print $client "Accept-Ranges: bytes\r\n";
+    print $client "Connection: close\r\n\r\n";
+
+    if ($method eq 'GET') {
+        open(my $fh, '<:raw', $file) or return;
+        my $buf;
+        while (read($fh, $buf, 65536)) {
+            print $client $buf or last;
+        }
+        close $fh;
+    }
 }
 
 sub _get_local_ip {
