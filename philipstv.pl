@@ -135,6 +135,8 @@ my %commands = (
     'wol'         => \&cmd_wol,
     'on'          => \&cmd_wol,
     'helptv'      => \&cmd_helptv,
+    'tv-screen'   => \&cmd_tv_screen,
+    'tv-screen-stop' => \&cmd_tv_screen_stop,
 );
 
 if (my $fn = $commands{$CMD}) {
@@ -541,9 +543,82 @@ sub cmd_helptv {
   tv ~/Videos/      Open tmux TV dashboard for folder
   screen On/Off     Display on/off
 
+  tv-screen [RES]   Virtual X screen on TV (Xephyr + NVENC capture)
+                    Default 1920x1080. Run apps: DISPLAY=:1 firefox
+  tv-screen-stop    Stop virtual screen
+
   system            Model, firmware, API version
   settings          Settings tree with node IDs
 TV
+}
+
+sub cmd_tv_screen {
+    my ($res) = @_;
+    $res ||= '1920x1080';
+    my $disp = ':1';
+
+    # Prevent double run
+    my $check = `pgrep -f "Xephyr $disp" 2>/dev/null`;
+    if ($check && $check =~ /\d+/) {
+        chomp $check;
+        print "Xephyr already running on $disp (PID $check)\n";
+        print "Use: tv-screen-stop to kill it first\n";
+        return;
+    }
+
+    my $port = $CAST_PORT + 1;  # 8889
+    my $local_ip = _get_local_ip();
+    my $script = File::Spec->rel2abs($0);
+
+    # Kill old stuff on port
+    system("fuser -k $port/tcp >/dev/null 2>&1");
+    sleep 1;
+
+    # Ensure tmux tv session exists
+    my $has_tv = !system("tmux has-session -t tv 2>/dev/null");
+    unless ($has_tv) {
+        system("tmux new-session -d -s tv -n remote 'bash'");
+    }
+
+    # Add screen window in tmux — runs Xephyr + WM + capture
+    my $screen_cmd = join('; ',
+        "echo '=== TV Screen: $disp ($res) ==='",
+        "Xephyr $disp -screen $res -resizeable -no-host-grab &",
+        "sleep 2",
+        "DISPLAY=$disp xfwm4 &",
+        "DISPLAY=$disp xterm &",
+        "sleep 1",
+        "echo '>>> Capture starting (NVENC)...'",
+        "DISPLAY=$disp ffmpeg -f x11grab -framerate 25 -video_size $res -i $disp " .
+            "-c:v h264_nvenc -preset p4 -b:v 10M -g 50 -c:a aac -b:a 192k " .
+            "-movflags +frag_keyframe+empty_moov+default_base_moof " .
+            "-f mp4 -listen 1 http://0.0.0.0:$port",
+        "echo '>>> Screen capture ended'",
+        "bash",
+    );
+    system("tmux new-window -t tv -n screen '$screen_cmd'");
+
+    sleep 4;
+
+    # DLNA play
+    my $url = "http://$local_ip:$port";
+    print "Stream: $url\n";
+    _dlna_play($HOST, $url);
+
+    print "=== TV Screen Active ===\n";
+    print "Display: DISPLAY=$disp\n";
+    print "Run: DISPLAY=$disp firefox\n";
+    print "     DISPLAY=$disp vlc movie.mp4\n";
+    print "tmux attach -t tv (window: screen)\n";
+}
+
+sub cmd_tv_screen_stop {
+    my $disp = ':1';
+    system("pkill -f 'Xephyr $disp'");
+    system("fuser -k " . ($CAST_PORT + 1) . "/tcp 2>/dev/null");
+    print "TV screen stopped\n";
+    # Kill tmux window
+    system("tmux kill-window -t tv:screen 2>/dev/null");
 }
 
 sub cmd_wol {
@@ -628,6 +703,8 @@ sub cmd_tv {
     print $rc "alias on='$script on'\n";
     print $rc "alias wol='$script wol'\n";
     print $rc "alias helptv='$script helptv'\n";
+    print $rc "alias tv-screen='$script tv-screen'\n";
+    print $rc "alias tv-screen-stop='$script tv-screen-stop'\n";
     print $rc "alias dlna-play='$script dlna-play'\n";
     print $rc "alias dlna-status='$script dlna-status'\n";
     print $rc "alias status='$script status'\n";
