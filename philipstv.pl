@@ -19,7 +19,6 @@ use MIME::Base64;
 use Digest::HMAC_SHA1;
 use Sys::Hostname;
 use Socket qw(inet_aton sockaddr_in);
-use IO::Socket::INET;
 
 my $HOST     = '';
 my $PORT     = 1926;
@@ -462,11 +461,6 @@ sub cmd_cast {
     } else {
         # Transcode first
         print "Transcoding with ffmpeg" . ($use_nvenc ? " (NVENC)" : "") . "...\n";
-        # GPU monitor if NVENC
-        if ($use_nvenc) {
-            system("tmux has-session -t tv 2>/dev/null || tmux new-session -d -s tv -n remote 'bash'");
-            system("tmux new-window -t tv -n gpu 'watch -n1 nvidia-smi'");
-        }
         system(@ffcmd);
         if ($? != 0) {
             die "ffmpeg failed\n";
@@ -604,9 +598,6 @@ sub cmd_tv_screen {
     );
     system("tmux new-window -t tv -n screen '$screen_cmd'");
 
-    # nvidia-smi monitor window
-    system("tmux new-window -t tv -n gpu 'watch -n1 nvidia-smi'");
-
     sleep 4;
 
     # DLNA play
@@ -646,6 +637,16 @@ sub cmd_wol {
     $sock->close;
 
     print "WoL magic packet sent to $MAC\n";
+    print "Waiting for TV...\n";
+    for my $i (1..10) {
+        sleep 2;
+        my $scr = api_get('screenstate');
+        if ($scr && ($scr->{screenstate} || '') eq 'On') {
+            print "TV is ON!\n";
+            return;
+        }
+    }
+    print "TV did not respond (may not support WoL over WiFi)\n";
 }
 
 sub cmd_tv {
@@ -685,9 +686,7 @@ sub cmd_tv {
     #  window 0: http — server с видими requests
     #  window 1: playlist — файлове за избор
     #  window 2: remote — интерактивен контрол
-    # Start built-in Perl HTTP server (fork, background)
-    _start_http_server($serve_dir, $port);
-    system("tmux new-session -d -s tv -n http 'echo \"=== HTTP :$port — $serve_dir ===\"; while true; do ss -tn 2>/dev/null | grep $port | while read l; do echo \"\$(date +%H:%M:%S) \$l\"; done; sleep 2; done'");
+    system("tmux new-session -d -s tv -n http 'cd \"$serve_dir\" && python3 -m http.server $port'");
     system("tmux new-window -t tv -n playlist 'cat $playlist; echo; echo \"Play: philipstv.pl dlna-play http://$local_ip:$port/FILENAME\"; echo \"Vol:  philipstv.pl vol+/vol-/mute\"; echo; bash'");
     # Write rc file with aliases
     my $rcfile = "/tmp/tv-remote.rc";
@@ -755,11 +754,6 @@ sub cmd_tv {
     print $hf "$_\n" for @cmds;
     close($hf);
     system("tmux new-window -t tv -n remote 'bash --rcfile $rcfile'");
-
-    # GPU monitor if NVENC
-    if ($NVENC) {
-        system("tmux new-window -t tv -n gpu 'watch -n1 nvidia-smi'");
-    }
 
     # If specific file given, play it
     if (-f $abs) {
@@ -855,6 +849,7 @@ sub _dlna_play {
 
 sub _ssdp_discover {
     my ($tv_ip) = @_;
+    require IO::Socket::INET;
 
     my $search = "M-SEARCH * HTTP/1.1\r\n" .
                  "HOST: 239.255.255.250:1900\r\n" .
@@ -975,17 +970,7 @@ sub _start_http_server {
     my ($dir, $port) = @_;
     my $pidfile = "/tmp/philipstv-http.pid";
 
-    # Check if our server is already running on this port
-    if (-f $pidfile) {
-        open(my $pf, '<', $pidfile);
-        my $old_pid = <$pf>; chomp $old_pid; close($pf);
-        if ($old_pid && kill(0, $old_pid)) {
-            print "HTTP server already running (PID $old_pid)\n";
-            return $old_pid;
-        }
-    }
-
-    # Kill anything else on this port
+    # Kill anything on this port
     system("fuser -k $port/tcp >/dev/null 2>&1");
     sleep 1;
 
@@ -1032,12 +1017,6 @@ sub _http_handle {
     my $request_line = <$client>;
     return unless $request_line;
     chomp $request_line;
-
-    # Log to stderr (visible in debug mode or /tmp/philipstv-http.log)
-    my $ts = `date +%H:%M:%S 2>/dev/null`; chomp $ts;
-    open(my $log, '>>', '/tmp/philipstv-http.log');
-    print $log "$ts $request_line\n";
-    close($log);
 
     my ($method, $path) = $request_line =~ m{^(GET|HEAD)\s+(/\S*)\s+HTTP/};
     return unless $method && $path;
