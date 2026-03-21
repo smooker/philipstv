@@ -62,6 +62,22 @@ pass = your_password_here
 ./philipstv.pl key CursorUp
 ./philipstv.pl key Confirm
 
+# DLNA Cast — play local files on TV
+./philipstv.pl dlna-play video.mp4           # serve + play (auto HTTP server)
+./philipstv.pl dlna-play http://url/video.mp4 # play URL directly
+./philipstv.pl --nvenc cast video.mkv         # transcode with RTX GPU + play
+./philipstv.pl dlna-status                    # DLNA transport state
+
+# Wake on LAN
+./philipstv.pl on                 # wake TV (magic packet)
+./philipstv.pl wol                # same
+
+# TV Dashboard — tmux session with remote control
+./philipstv.pl tv ~/Videos/       # open TV dashboard for folder
+./philipstv.pl tv video.mp4       # play file + open dashboard
+# Windows: http (server log) | playlist (files) | remote (aliases)
+# Aliases in remote: vol+ vol- mute pause play stop dlna-play on status
+
 # Settings
 ./philipstv.pl settings         # show settings tree with node IDs
 ./philipstv.pl setting-get 123  # get value by node ID
@@ -79,7 +95,19 @@ pass = your_password_here
 --port PORT      API port (default: 1926)
 --user USER      Digest auth username (from pairing)
 --pass PASS      Digest auth password (from pairing)
---debug          Show HTTP requests
+--nvenc          Use NVIDIA NVENC for hardware video encoding
+--cast-port N    HTTP server port for casting (default: 8888)
+--debug          Show HTTP requests and DLNA SOAP details
+```
+
+## Configuration
+
+`~/.philipstv.conf`:
+```ini
+host = 192.168.1.100
+user = your_username_here
+pass = your_password_here
+mac = aa:bb:cc:dd:ee:ff    # for Wake on LAN
 ```
 
 ## Tested on
