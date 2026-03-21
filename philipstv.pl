@@ -781,6 +781,7 @@ sub _find_avtransport {
 
 sub _dlna_set_uri {
     my ($control_url, $media_url) = @_;
+    $media_url = _url_encode_path($media_url);
     my $body = _soap_envelope('SetAVTransportURI',
         '<InstanceID>0</InstanceID>' .
         '<CurrentURI>' . _xml_escape($media_url) . '</CurrentURI>' .
@@ -820,6 +821,17 @@ sub _soap_post {
     print STDERR "DLNA response: " . $res->status_line . "\n" if $DEBUG;
     print STDERR "DLNA body: " . $res->content . "\n" if $DEBUG && !$res->is_success;
     return $res->is_success;
+}
+
+sub _url_encode_path {
+    my ($url) = @_;
+    # Encode only the filename part (after last /)
+    if ($url =~ m{^(https?://[^/]+/.*/?)([^/]+)$}) {
+        my ($base, $file) = ($1, $2);
+        $file =~ s/([^A-Za-z0-9._~-])/sprintf("%%%02X", ord($1))/ge;
+        return "$base$file";
+    }
+    return $url;
 }
 
 sub _xml_escape {
