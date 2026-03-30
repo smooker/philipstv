@@ -70,6 +70,10 @@ pass = your_password_here
 ./philipstv.pl dlna-status                    # DLNA transport state
 ./philipstv.pl key Subtitle                   # switch subtitle track on TV
 
+# Browser — open URL on TV
+./philipstv.pl browser youtube.com          # auto-adds https://
+./philipstv.pl browser https://google.com   # open specific URL
+
 # Wake on LAN
 ./philipstv.pl on                 # wake TV (magic packet)
 ./philipstv.pl wol                # same

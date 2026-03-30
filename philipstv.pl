@@ -1339,6 +1339,17 @@ Set a setting value by node ID. Value must be valid JSON.
 
 =back
 
+=head2 Browser
+
+=over 4
+
+=item B<browser> I<url>
+
+Open a URL in the TV's built-in browser. Automatically prepends C<https://>
+if no protocol is specified. Uses the Titan OS C<activities/browser> endpoint.
+
+=back
+
 =head2 Raw API Access
 
 =over 4
