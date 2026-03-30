@@ -134,6 +134,7 @@ my %commands = (
     'tv'          => \&cmd_tv,
     'wol'         => \&cmd_wol,
     'on'          => \&cmd_wol,
+    'browser'     => \&cmd_browser,
     'helptv'      => \&cmd_helptv,
 );
 
@@ -516,6 +517,14 @@ sub cmd_dlna_status {
     print $res->content . "\n";
 }
 
+sub cmd_browser {
+    my ($url) = @_;
+    die "Usage: philipstv.pl browser <url>\n" unless $url;
+    $url = "https://$url" unless $url =~ m{^https?://};
+    api_post('activities/browser', { url => $url });
+    print "Browser: $url\n";
+}
+
 sub cmd_helptv {
     print <<'TV';
 === TV Quick Reference ===
@@ -533,6 +542,8 @@ sub cmd_helptv {
 
   pause / play / stop   Playback control (key aliases)
   key Home / Back / Confirm / CursorUp/Down/Left/Right
+
+  browser URL       Open URL in TV browser
 
   ch nova           Switch channel (partial match)
   channels          List all channels
@@ -1112,6 +1123,8 @@ Commands:
   settings         Show settings tree with node IDs
   setting-get <id> Get setting value by node ID
   setting-set <id> '<json>' Set setting value
+
+  browser <url>    Open URL in TV browser (auto-adds https://)
 
   cast <file|url>  Stream video to TV via ffmpeg HTTP + JointSpace
                    Options: --nvenc (RTX GPU encode), --port N (default 8888)
