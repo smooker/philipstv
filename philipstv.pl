@@ -11,6 +11,8 @@
 
 use strict;
 use warnings;
+use FindBin;
+use lib "$FindBin::Bin/local/lib/perl5";
 use Getopt::Long;
 use JSON;
 use LWP::UserAgent;
