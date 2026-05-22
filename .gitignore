@@ -2,3 +2,4 @@
 local/
 .bin/
 cpanm.bootstrap
+cpanm
