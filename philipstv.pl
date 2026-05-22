@@ -170,7 +170,11 @@ sub api_post {
     $req->content($body);
     my $res = $ua->request($req);
     print STDERR "POST $path: " . $res->status_line . "\n" if $DEBUG;
-    return $res->is_success;
+    unless ($res->is_success) {
+        warn "POST $path failed: " . $res->status_line . "\n";
+        return 0;
+    }
+    return 1;
 }
 
 # --- Command implementations ---
@@ -523,7 +527,7 @@ sub cmd_browser {
     my ($url) = @_;
     die "Usage: philipstv.pl browser <url>\n" unless $url;
     $url = "https://$url" unless $url =~ m{^https?://};
-    api_post('activities/browser', { url => $url });
+    api_post('activities/browser', { url => $url }) or exit 1;
     print "Browser: $url\n";
 }
 
